@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Mobius Web Scraper Worker – consume from Redis, run scrape jobs.
+set -e
+SCRIPT="$0"
+while [ -h "$SCRIPT" ]; do
+  TARGET="$(readlink "$SCRIPT")"
+  [[ $TARGET == /* ]] && SCRIPT="$TARGET" || SCRIPT="$(dirname "$SCRIPT")/$TARGET"
+done
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT" || exit 1
+
+export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
+
+if [ ! -d .venv ]; then
+  echo "[mscrapew] No .venv in mobius-skills/web-scraper. Create it:"
+  echo "  cd $ROOT && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt"
+  exit 1
+fi
+
+echo "[mscrapew] Starting scraper worker (REDIS_URL=$REDIS_URL)..."
+exec .venv/bin/python -m app.worker
