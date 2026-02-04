@@ -104,3 +104,18 @@ def extract_text(html: str) -> str:
     text = soup.get_text(separator="\n", strip=True)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n\n".join(lines)
+
+
+def extract_html(html: str, clean: bool = True) -> str:
+    """
+    Extract body HTML from page. When clean=True, strip scripts/styles/nav/footer
+    for cleaner content HTML. Returns string of body HTML.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    if clean:
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+    body = soup.find("body")
+    if body:
+        return str(body)
+    return str(soup)

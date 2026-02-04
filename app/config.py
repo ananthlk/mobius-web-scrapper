@@ -26,6 +26,7 @@ SCRAPER_REQUEST_KEY = os.getenv("SCRAPER_REQUEST_KEY", "mobius:scraper:requests"
 SCRAPER_RESPONSE_KEY_PREFIX = os.getenv("SCRAPER_RESPONSE_KEY_PREFIX", "mobius:scraper:response:")
 SCRAPER_RESPONSE_TTL_SECONDS = int(os.getenv("SCRAPER_RESPONSE_TTL_SECONDS", "86400"))
 SCRAPER_STREAM_CHANNEL_PREFIX = os.getenv("SCRAPER_STREAM_CHANNEL_PREFIX", "mobius:scraper:stream:")
+SCRAPER_EVENTS_KEY_PREFIX = os.getenv("SCRAPER_EVENTS_KEY_PREFIX", "mobius:scraper:events:")
 
 # Tree scan
 TREE_MAX_DEPTH = int(os.getenv("TREE_MAX_DEPTH", "3"))
