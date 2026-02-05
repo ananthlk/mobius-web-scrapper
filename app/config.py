@@ -28,6 +28,9 @@ SCRAPER_RESPONSE_TTL_SECONDS = int(os.getenv("SCRAPER_RESPONSE_TTL_SECONDS", "86
 SCRAPER_STREAM_CHANNEL_PREFIX = os.getenv("SCRAPER_STREAM_CHANNEL_PREFIX", "mobius:scraper:stream:")
 SCRAPER_EVENTS_KEY_PREFIX = os.getenv("SCRAPER_EVENTS_KEY_PREFIX", "mobius:scraper:events:")
 
+# Rate limiting: delay (seconds) before each HTTP request to avoid hammering the target site
+REQUEST_DELAY_SECONDS = float(os.getenv("REQUEST_DELAY_SECONDS", "1.0"))
+
 # Tree scan
 TREE_MAX_DEPTH = int(os.getenv("TREE_MAX_DEPTH", "3"))
 TREE_MAX_PAGES = int(os.getenv("TREE_MAX_PAGES", "50"))

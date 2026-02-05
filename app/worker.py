@@ -41,6 +41,16 @@ def _publish_event(r, channel: str, events_key: str, event: dict, ttl: int) -> N
     r.expire(events_key, ttl)
 
 
+def _user_facing_error(e: Exception) -> str:
+    """Return a clear message for the user; honor 403 and robots.txt intent."""
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 403:
+        return "This site does not allow automated access (403 Forbidden). Open the URL in your browser instead."
+    if isinstance(e, PermissionError) or "robots.txt" in str(e).lower():
+        return str(e) if str(e).strip() else "This URL is disallowed by robots.txt. We do not scrape it."
+    return str(e)
+
+
 def _publish_response(
     job_id: str,
     status: str,
@@ -78,9 +88,23 @@ def _process_job(payload: dict) -> None:
     channel = SCRAPER_STREAM_CHANNEL_PREFIX + job_id
     events_key = SCRAPER_EVENTS_KEY_PREFIX + job_id
     ttl = SCRAPER_RESPONSE_TTL_SECONDS
+    documents_so_far: list[dict] = []
+    pages_so_far: list[dict] = []
 
     def emit(event: dict) -> None:
         _publish_event(r, channel, events_key, event, ttl)
+
+    def _push_running_state() -> None:
+        """Write current documents/pages to Redis so frontend (poll or SSE) sees interim state.
+        Pages are sent as stubs (url, depth, timestamp) only to avoid huge payloads when
+        content_mode is 'both' (text+html); full content is streamed via SSE page events."""
+        page_stubs = [
+            {"url": p.get("url"), "depth": p.get("depth"), "timestamp": p.get("timestamp")}
+            for p in pages_so_far
+        ]
+        _publish_response(
+            job_id, "running", list(documents_so_far), page_stubs, None, None, len(pages_so_far)
+        )
 
     def on_progress(phase: str, message: str, url_or_none: str | None, count: int | None) -> None:
         evt = {
@@ -107,6 +131,9 @@ def _process_job(payload: dict) -> None:
             "payload": {"url": page_url, **{k: v for k, v in entry.items() if k in ("text", "html")}},
         }
         emit(evt)
+        page_record = {"url": page_url or entry.get("final_url", ""), **{k: v for k, v in entry.items() if k in ("text", "html", "final_url", "depth", "timestamp")}}
+        pages_so_far.append(page_record)
+        _push_running_state()
 
     def on_document(doc: dict, meta: dict) -> None:
         evt = {
@@ -122,6 +149,8 @@ def _process_job(payload: dict) -> None:
             "payload": {"gcs_path": doc["gcs_path"], "filename": doc["filename"]},
         }
         emit(evt)
+        documents_so_far.append(doc)
+        _push_running_state()
 
     try:
         emit({"type": "progress", "metadata": {"timestamp": _iso_now(), "job_id": job_id}, "payload": {"phase": "starting", "message": f"Starting {mode} scan of {url}"}})
@@ -181,8 +210,9 @@ def _process_job(payload: dict) -> None:
         logger.info("Job %s completed: %d docs, %d pages, summary=%s", job_id, len(documents), n, bool(summary))
     except Exception as e:
         logger.exception("Job %s failed: %s", job_id, e)
-        emit({"type": "done", "metadata": {"timestamp": _iso_now(), "job_id": job_id}, "payload": {"status": "failed", "error": str(e)}})
-        _publish_response(job_id, "failed", [], [], None, str(e), 0)
+        msg = _user_facing_error(e)
+        emit({"type": "done", "metadata": {"timestamp": _iso_now(), "job_id": job_id}, "payload": {"status": "failed", "error": msg}})
+        _publish_response(job_id, "failed", [], [], None, msg, 0)
 
 
 def run_worker():

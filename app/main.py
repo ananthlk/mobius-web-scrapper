@@ -231,10 +231,18 @@ def stream_scrape_content(job_id: str):
 
 @app.post("/scrape/review", response_model=ScrapeReviewResponse)
 async def scrape_review(req: ScrapeReviewRequest):
-    """Sync: fetch single page, extract text, optionally summarize."""
+    """Sync: fetch single page, extract text, optionally summarize. Respects robots.txt."""
     try:
         text = await review_page(req.url)
+    except PermissionError as e:
+        logger.info("Review blocked by robots.txt for %s: %s", req.url, e)
+        raise HTTPException(status_code=403, detail=str(e) or "This URL is disallowed by robots.txt. We do not scrape it.")
     except Exception as e:
+        if getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 403:
+            raise HTTPException(
+                status_code=403,
+                detail="This site does not allow automated access (403 Forbidden). Open the URL in your browser instead.",
+            )
         logger.warning("Review failed for %s: %s", req.url, e)
         raise HTTPException(status_code=502, detail=f"Failed to fetch page: {e}")
     summary = summarize_content(text) if req.include_summary and text else None
