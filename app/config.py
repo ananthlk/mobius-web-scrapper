@@ -4,10 +4,7 @@ import sys
 from pathlib import Path
 
 _repo_root = Path(__file__).resolve().parent.parent
-# mobius-config may be sibling (Mobius/mobius-config) when run from Mobius
-_config_dir = _repo_root.parent / "mobius-config"
-if not _config_dir.exists():
-    _config_dir = _repo_root.parent.parent / "mobius-config"
+_config_dir = _repo_root.parent.parent / "mobius-config"
 if _config_dir.exists() and str(_config_dir) not in sys.path:
     sys.path.insert(0, str(_config_dir))
 try:
@@ -27,9 +24,6 @@ SCRAPER_RESPONSE_KEY_PREFIX = os.getenv("SCRAPER_RESPONSE_KEY_PREFIX", "mobius:s
 SCRAPER_RESPONSE_TTL_SECONDS = int(os.getenv("SCRAPER_RESPONSE_TTL_SECONDS", "86400"))
 SCRAPER_STREAM_CHANNEL_PREFIX = os.getenv("SCRAPER_STREAM_CHANNEL_PREFIX", "mobius:scraper:stream:")
 SCRAPER_EVENTS_KEY_PREFIX = os.getenv("SCRAPER_EVENTS_KEY_PREFIX", "mobius:scraper:events:")
-
-# Rate limiting: delay (seconds) before each HTTP request to avoid hammering the target site
-REQUEST_DELAY_SECONDS = float(os.getenv("REQUEST_DELAY_SECONDS", "1.0"))
 
 # Tree scan
 TREE_MAX_DEPTH = int(os.getenv("TREE_MAX_DEPTH", "3"))

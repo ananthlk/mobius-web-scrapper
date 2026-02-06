@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
 # Mobius Web Scraper Worker – consume from Redis, run scrape jobs.
+# Uses shared venv and cloud Redis.
 set -e
+
 SCRIPT="$0"
 while [ -h "$SCRIPT" ]; do
   TARGET="$(readlink "$SCRIPT")"
   [[ $TARGET == /* ]] && SCRIPT="$TARGET" || SCRIPT="$(dirname "$SCRIPT")/$TARGET"
 done
 ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+MOBIUS_ROOT="$(cd "$ROOT/../.." && pwd)"
+VENV="$MOBIUS_ROOT/.venv"
+
 cd "$ROOT" || exit 1
 
-export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
+# Load .env
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  source "$ROOT/.env"
+  set +a
+fi
 
-if [ ! -d .venv ]; then
-  echo "[mscrapew] No .venv in mobius-skills/web-scraper. Create it:"
-  echo "  cd $ROOT && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt"
+export REDIS_URL="${REDIS_URL:-redis://10.40.102.67:6379/0}"
+
+# Check for shared venv
+if [ ! -d "$VENV" ]; then
+  echo "[mscrapew] No shared venv at $VENV. Create it:"
+  echo "  cd $MOBIUS_ROOT && python3.11 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
   exit 1
 fi
 
 echo "[mscrapew] Starting scraper worker (REDIS_URL=$REDIS_URL)..."
-exec .venv/bin/python -m app.worker
+exec "$VENV/bin/python" -m app.worker

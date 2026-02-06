@@ -1,33 +1,21 @@
 """Core scrape logic: regular and tree scan."""
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Callable
 from urllib.parse import urlparse
 
-from app.config import (
-    REQUEST_DELAY_SECONDS,
-    TREE_MAX_DEPTH,
-    TREE_MAX_PAGES,
-    SCOPE_MODE,
-    DOCUMENT_TYPES,
-)
+from app.config import TREE_MAX_DEPTH, TREE_MAX_PAGES, SCOPE_MODE, DOCUMENT_TYPES
 from app.services.fetcher import (
     fetch_page,
     extract_links,
     extract_page_links,
     extract_text,
-    extract_html,
     can_fetch_url,
     DEFAULT_USER_AGENT,
 )
 from app.services.document_downloader import download_and_upload
 
 logger = logging.getLogger(__name__)
-
-
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _same_domain(url: str, base_netloc: str) -> bool:
@@ -45,37 +33,26 @@ def _same_origin(url: str, base_url: str) -> bool:
     )
 
 
-# Max chars per field to avoid huge payloads (Redis/SSE) when content_mode is "both"
-PAGE_TEXT_MAX_CHARS = 100_000
-PAGE_HTML_MAX_CHARS = 200_000
-
-
-def _build_page_entry(url: str, content_mode: str, html: str, depth: int | None = None) -> dict:
-    """Build page entry dict with text/html based on content_mode, plus metadata.
-    Text and HTML are capped to avoid blocking Redis/SSE with multi-MB payloads."""
-    entry: dict = {"url": url, "final_url": url, "depth": depth, "timestamp": _iso_now()}
-    if content_mode in ("text", "both"):
-        text = extract_text(html)
-        if text.strip():
-            entry["text"] = text[:PAGE_TEXT_MAX_CHARS] if len(text) > PAGE_TEXT_MAX_CHARS else text
-    if content_mode in ("html", "both"):
-        raw_html = extract_html(html)
-        entry["html"] = raw_html[:PAGE_HTML_MAX_CHARS] if len(raw_html) > PAGE_HTML_MAX_CHARS else raw_html
-    return entry if ("text" in entry or "html" in entry) else {}
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    """Return True if path is under prefix (or exact match). prefix e.g. /providers."""
+    if not prefix or not prefix.strip():
+        return True
+    p = (path or "/").lower()
+    pre = prefix.strip().lower().rstrip("/")
+    if not pre.startswith("/"):
+        pre = "/" + pre
+    return p == pre or p.startswith(pre + "/")
 
 
 async def scrape_regular(
     url: str,
     job_id: str,
     document_types: list[str] | None = None,
-    content_mode: str = "text",
-    download_documents: bool = True,
-    on_page_scraped: Callable[[str, dict], None] | None = None,
-    on_document: Callable[[dict, dict], None] | None = None,
-    on_progress: Callable[[str, str, str | None, int | None], None] | None = None,
+    include_content: bool = True,
+    on_page_scraped: Callable[[str, str], None] | None = None,
 ) -> tuple[list[dict], list[dict], int]:
     """
-    Simple scan: single page, extract content and optionally download documents.
+    Regular scan: single page, extract text and download documents.
     Respects robots.txt: skips fetch/download if disallowed.
     Returns (documents, pages, pages_scraped).
     """
@@ -83,40 +60,24 @@ async def scrape_regular(
     ext_set = set(doc_types)
     robots_cache: dict = {}
 
-    if on_progress:
-        on_progress("fetching", f"Fetching page: {url}", url, None)
-    allowed = await can_fetch_url(url, DEFAULT_USER_AGENT, robots_cache)
-    if not allowed:
+    if not await can_fetch_url(url, DEFAULT_USER_AGENT, robots_cache):
         logger.info("Skipping %s: disallowed by robots.txt", url)
         raise PermissionError("This URL is disallowed by robots.txt. We do not scrape it.")
-    await asyncio.sleep(REQUEST_DELAY_SECONDS)
     html, final_url = await fetch_page(url)
+    text = extract_text(html) if include_content else ""
+    doc_links = extract_links(html, final_url, ext_set)
     documents: list[dict] = []
     pages: list[dict] = []
+    if include_content and text.strip():
+        pages.append({"url": final_url, "text": text})
 
-    if content_mode != "none":
-        entry = _build_page_entry(final_url, content_mode, html, depth=0)
-        if entry:
-            pages.append(entry)
-            if on_page_scraped:
-                on_page_scraped(final_url, entry)
-
-    if download_documents:
-        doc_links = extract_links(html, final_url, ext_set)
-        total = len(doc_links)
-        for i, link in enumerate(doc_links):
-            if not await can_fetch_url(link, DEFAULT_USER_AGENT, robots_cache):
-                logger.debug("Skipping document %s: disallowed by robots.txt", link)
-                continue
-            filename_hint = link.rstrip("/").split("/")[-1][:60] or "document"
-            if on_progress:
-                on_progress("downloading", f"Downloading {i + 1}/{total}: {filename_hint}", link, i + 1)
-            await asyncio.sleep(REQUEST_DELAY_SECONDS)
-            result = await download_and_upload(link, job_id, doc_types, source_page_url=final_url)
-            if result:
-                documents.append(result)
-                if on_document:
-                    on_document(result, {"source_page_url": final_url})
+    for link in doc_links:
+        if not await can_fetch_url(link, DEFAULT_USER_AGENT, robots_cache):
+            logger.debug("Skipping document %s: disallowed by robots.txt", link)
+            continue
+        result = await download_and_upload(link, job_id, doc_types)
+        if result:
+            documents.append(result)
 
     return documents, pages, 1
 
@@ -127,26 +88,28 @@ async def scrape_tree(
     max_depth: int | None = None,
     max_pages: int | None = None,
     scope_mode: str | None = None,
+    path_prefix: str | None = None,
     document_types: list[str] | None = None,
-    content_mode: str = "text",
-    download_documents: bool = True,
-    on_page_scraped: Callable[[str, dict], None] | None = None,
-    on_document: Callable[[dict, dict], None] | None = None,
-    on_progress: Callable[[str, str, str | None, int | None], None] | None = None,
+    include_content: bool = True,
+    on_page_scraped: Callable[[str, str], None] | None = None,
 ) -> tuple[list[dict], list[dict], int]:
     """
-    Tree scan: BFS from seed URL, collect document links and page content, optionally download.
+    Tree scan: BFS from seed URL, collect document links and page content, download.
     Returns (documents, pages, pages_scraped).
     """
-    depth_limit = max_depth or TREE_MAX_DEPTH
+    depth = max_depth or TREE_MAX_DEPTH
     limit = max_pages or TREE_MAX_PAGES
     scope = scope_mode or SCOPE_MODE
     doc_types = document_types or DOCUMENT_TYPES
     ext_set = set(doc_types)
+    path_prefix_norm = None
+    if path_prefix and str(path_prefix).strip():
+        p = str(path_prefix).strip()
+        path_prefix_norm = p if p.startswith("/") else "/" + p
+        logger.info("Tree scan path_prefix filter active: %r", path_prefix_norm)
 
     parsed_seed = urlparse(url)
     base_netloc = parsed_seed.netloc.lower()
-
     robots_cache: dict = {}
     if not await can_fetch_url(url, DEFAULT_USER_AGENT, robots_cache):
         logger.info("Seed URL %s disallowed by robots.txt", url)
@@ -154,8 +117,7 @@ async def scrape_tree(
 
     to_visit: list[tuple[str, int]] = [(url, 0)]
     visited: set[str] = set()
-    all_doc_links: list[tuple[str, str]] = []  # (link, source_page_url)
-    seen_doc_links: set[str] = set()
+    all_doc_links: set[str] = set()
     pages_content: list[dict] = []
     pages_scraped = 0
 
@@ -165,7 +127,7 @@ async def scrape_tree(
             continue
         visited.add(current)
 
-        if d > depth_limit:
+        if d > depth:
             continue
 
         # Skip document URLs (pdf, etc.) — we don't fetch them as HTML; they're downloaded via doc_links
@@ -181,31 +143,26 @@ async def scrape_tree(
             logger.debug("Skipping %s: disallowed by robots.txt", current)
             continue
         try:
-            if on_progress:
-                on_progress("fetching", f"Fetching page {pages_scraped + 1}/{limit}: {current[:80]}{'…' if len(current) > 80 else ''}", current, pages_scraped)
-            await asyncio.sleep(REQUEST_DELAY_SECONDS)
             html, final_url = await fetch_page(current)
         except Exception as e:
             logger.warning("Failed to fetch %s: %s", current, e)
             continue
 
         pages_scraped += 1
-        if content_mode != "none":
-            entry = _build_page_entry(final_url, content_mode, html, depth=d)
-            if entry:
-                pages_content.append(entry)
+        if include_content:
+            text = extract_text(html)
+            if text.strip():
+                pages_content.append({"url": final_url, "text": text})
                 if on_page_scraped:
-                    on_page_scraped(final_url, entry)
+                    on_page_scraped(final_url, text)
 
-        if download_documents:
-            doc_links = extract_links(html, final_url, ext_set)
-            for link in doc_links:
-                if link not in seen_doc_links:
-                    seen_doc_links.add(link)
-                    all_doc_links.append((link, final_url))
+        # Collect document links
+        doc_links = extract_links(html, final_url, ext_set)
+        for link in doc_links:
+            all_doc_links.add(link)
 
         # Collect page links for next level (exclude document URLs — they're downloaded, not fetched as HTML)
-        if d < depth_limit:
+        if d < depth:
             page_links = extract_page_links(html, final_url)
             for link in page_links:
                 if scope == "same_domain" and not _same_domain(link, base_netloc):
@@ -213,29 +170,25 @@ async def scrape_tree(
                 if scope == "same_origin" and not _same_origin(link, url):
                     continue
                 parsed_link = urlparse(link)
-                path_lower = (parsed_link.path or "").lower()
+                link_path = parsed_link.path or "/"
+                if path_prefix_norm and not _path_matches_prefix(link_path, path_prefix_norm):
+                    continue
+                path_lower = link_path.lower()
                 ext = path_lower.split(".")[-1] if "." in path_lower else ""
                 if ext in ext_set:
                     continue
                 if link not in visited and (link, d + 1) not in [(u, _) for u, _ in to_visit]:
                     to_visit.append((link, d + 1))
 
+    # Download all documents
     documents: list[dict] = []
-    total_docs = len(all_doc_links)
-    if download_documents and all_doc_links:
-        for i, (link, source_page_url) in enumerate(all_doc_links):
-            if not await can_fetch_url(link, DEFAULT_USER_AGENT, robots_cache):
-                logger.debug("Skipping document %s: disallowed by robots.txt", link)
-                continue
-            filename_hint = link.rstrip("/").split("/")[-1][:60] or "document"
-            if on_progress:
-                on_progress("downloading", f"Downloading {i + 1}/{total_docs}: {filename_hint}", link, i + 1)
-            await asyncio.sleep(REQUEST_DELAY_SECONDS)
-            result = await download_and_upload(link, job_id, doc_types, source_page_url=source_page_url)
-            if result:
-                documents.append(result)
-                if on_document:
-                    on_document(result, {"source_page_url": source_page_url})
+    for link in all_doc_links:
+        if not await can_fetch_url(link, DEFAULT_USER_AGENT, robots_cache):
+            logger.debug("Skipping document %s: disallowed by robots.txt", link)
+            continue
+        result = await download_and_upload(link, job_id, doc_types)
+        if result:
+            documents.append(result)
 
     return documents, pages_content, pages_scraped
 

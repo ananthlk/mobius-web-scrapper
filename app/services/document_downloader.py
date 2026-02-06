@@ -44,11 +44,10 @@ async def download_and_upload(
     url: str,
     job_id: str,
     document_types: list[str] | None = None,
-    source_page_url: str | None = None,
 ) -> dict | None:
     """
     Download document from URL and upload to GCS.
-    Returns { gcs_path, filename, content_type, source_url, size_bytes, source_page_url? } or None.
+    Returns { gcs_path, filename, content_type } or None if not a downloadable document.
     """
     ext_set = set((document_types or DOCUMENT_TYPES))
     parsed = urlparse(url)
@@ -86,18 +85,12 @@ async def download_and_upload(
                 content_type=content_type or "application/octet-stream",
             )
             gcs_path = f"gs://{GCS_BUCKET}/{blob_path}"
-            size_bytes = len(resp.content)
-            logger.info("Uploaded %s to %s (%d bytes)", filename, gcs_path, size_bytes)
-            result: dict = {
+            logger.info("Uploaded %s to %s", filename, gcs_path)
+            return {
                 "gcs_path": gcs_path,
                 "filename": filename,
                 "content_type": content_type or None,
-                "source_url": url,
-                "size_bytes": size_bytes,
             }
-            if source_page_url:
-                result["source_page_url"] = source_page_url
-            return result
         except Exception as e:
             logger.error("Failed to upload to GCS %s: %s", blob_path, e)
             return None
